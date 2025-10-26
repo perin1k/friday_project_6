@@ -1,26 +1,26 @@
 # vision_pro_analysis.py
-# Advanced Sentiment Analysis of Apple Vision Pro Feedback using the Gemini API
+# Advanced Sentiment Analysis of Apple Vision Pro Feedback using the OpenAI API
 
 import json
 import sqlite3
 import time
-import requests
 import pandas as pd
 import matplotlib.pyplot as plt
 from wordcloud import WordCloud
 import os
+# Import the new, required OpenAI library
+from openai import OpenAI, RateLimitError, APIConnectionError, APIStatusError
 
 # --- 1. CONFIGURATION AND API KEY LOADING ---
 
 # Load the API key from the separate Perinskey.py file as requested.
 try:
-    # Importing the key from the user-defined file
-    from Perinskey import GEMINI_API_KEY
-    # Check if the placeholder key is still being used
-    if GEMINI_API_KEY == "YOUR_OPENAI_API_KEY_HERE":
-        raise ValueError("Please replace 'YOUR_OPENAI_API_KEY_HERE' in Perinskey.py with your actual Gemini API Key.")
+    # Use the new variable name
+    from Perinskey import OPENAI_API_KEY
+    if "YOUR_NEW_OPENAI_API_KEY_HERE" in OPENAI_API_KEY or "YOUR_OPENAI_API_KEY_HERE" in OPENAI_API_KEY:
+        raise ValueError("Please replace the placeholder in Perinskey.py with your new, secret OpenAI API Key.")
 except ImportError:
-    print("Error: Could not find 'Perinskey.py'. Please ensure it exists and contains 'GEMINI_API_KEY'.")
+    print("Error: Could not find 'Perinskey.py'. Please ensure it exists and contains 'OPENAI_API_KEY'.")
     exit()
 except ValueError as e:
     print(f"Configuration Error: {e}")
@@ -28,11 +28,18 @@ except ValueError as e:
 
 # Configuration
 DB_FILE = "feedback.db"
-# Using a powerful model suitable for structured data extraction
-MODEL_NAME = "gemini-2.5-flash" 
-API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={GEMINI_API_KEY}"
+# Use a modern OpenAI model that supports JSON mode
+OPENAI_MODEL = "gpt-4o" 
 MAX_RETRIES = 5
 BASE_DELAY = 1  # seconds
+
+# Initialize the OpenAI client
+# It will use the key we pass from our file.
+try:
+    client = OpenAI(api_key=OPENAI_API_KEY)
+except Exception as e:
+    print(f"Error initializing OpenAI client: {e}")
+    exit()
 
 # --- 2. DATA LOADING ---
 
@@ -40,7 +47,6 @@ def load_reviews(db_file):
     """Connects to the SQLite database and loads all reviews."""
     try:
         conn = sqlite3.connect(db_file)
-        # Assumes a table named 'reviews' with a column 'review_text'
         df = pd.read_sql_query("SELECT id, review_text FROM reviews", conn)
         conn.close()
         print(f"Successfully loaded {len(df)} reviews from {db_file}.")
@@ -49,92 +55,64 @@ def load_reviews(db_file):
         print(f"Error loading reviews from database: {e}")
         return []
 
-# --- 3. LLM ANALYSIS FUNCTION ---
+# --- 3. LLM ANALYSIS FUNCTION (UPDATED FOR OPENAI) ---
 
-def analyze_review_with_gemini(review_text):
+def analyze_review_with_openai(review_text):
     """
-    Calls the Gemini API to get structured sentiment and aspect extraction.
-    Uses exponential backoff for robust API calls.
+    Calls the OpenAI API to get structured sentiment and aspect extraction
+    using JSON Mode.
     """
+    
     # System instruction to define the role and output format
     system_prompt = (
         "You are an expert product analyst specializing in consumer electronics. "
         "Your task is to analyze a single customer review for the Apple Vision Pro. "
         "You must determine the overall sentiment and extract all mentioned product aspects or features. "
         "For each aspect, assign a specific sentiment (Positive, Negative, or Neutral). "
-        "Your response MUST be a single JSON object conforming to the provided schema."
+        "Your response MUST be a single, valid JSON object, adhering to the requested format. "
+        "The JSON object should have two keys: 'overall_sentiment' (string: Positive, Negative, or Neutral) and 'extracted_aspects' (an array of objects, where each object has 'aspect' and 'sentiment' keys)."
     )
     
-    # Define the required JSON output structure for structured extraction
-    response_schema = {
-        "type": "OBJECT",
-        "properties": {
-            "overall_sentiment": { 
-                "type": "STRING", 
-                "description": "The overall sentiment of the review (Positive, Negative, or Neutral)."
-            },
-            "extracted_aspects": {
-                "type": "ARRAY",
-                "description": "A list of objects, where each object is a distinct product aspect mentioned.",
-                "items": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "aspect": { "type": "STRING", "description": "The specific feature or product aspect mentioned (e.g., 'battery life', 'passthrough', 'EyeSight')." },
-                        "sentiment": { "type": "STRING", "description": "The sentiment associated with this aspect (Positive, Negative, or Neutral)." }
-                    },
-                    "propertyOrdering": ["aspect", "sentiment"]
-                }
-            }
-        },
-        "propertyOrdering": ["overall_sentiment", "extracted_aspects"]
-    }
-
-    payload = {
-        "contents": [{ "parts": [{ "text": f"Analyze the following customer review: '{review_text}'" }] }],
-        "systemInstruction": { "parts": [{ "text": system_prompt }] },
-        "config": {
-            "responseMimeType": "application/json",
-            "responseSchema": response_schema
-        }
-    }
+    user_prompt = f"Analyze the following customer review: '{review_text}'"
 
     for attempt in range(MAX_RETRIES):
         try:
-            # API Request
-            response = requests.post(
-                API_URL, 
-                headers={'Content-Type': 'application/json'},
-                data=json.dumps(payload)
+            # API Request using the OpenAI client
+            completion = client.chat.completions.create(
+                model=OPENAI_MODEL,
+                # Enable JSON Mode
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ]
             )
-            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
             
-            result = response.json()
+            # Extract the JSON string from the response
+            json_text = completion.choices[0].message.content
             
-            # Extract the raw JSON text from the API response
-            json_text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '{}')
-            
-            # Clean up the JSON string (LLM sometimes wraps it in markdown)
-            if json_text.strip().startswith('```json'):
-                 json_text = json_text.strip()[7:-3].strip()
-                 
+            # Parse the JSON string into a Python dictionary
             parsed_data = json.loads(json_text)
+            
+            # Basic validation
+            if 'overall_sentiment' not in parsed_data or 'extracted_aspects' not in parsed_data:
+                raise ValueError("Received JSON does not contain required keys.")
+                
             return parsed_data
 
-        except requests.exceptions.RequestException as e:
+        except (RateLimitError, APIConnectionError, APIStatusError) as e:
             # Exponential Backoff for API errors
             if attempt < MAX_RETRIES - 1:
                 delay = BASE_DELAY * (2 ** attempt)
-                print(f"API Error (Attempt {attempt+1}/{MAX_RETRIES}): {e}. Retrying in {delay:.2f}s...")
+                print(f"OpenAI API Error (Attempt {attempt+1}/{MAX_RETRIES}): {e}. Retrying in {delay:.2f}s...")
                 time.sleep(delay)
             else:
-                print(f"Fatal API Error after {MAX_RETRIES} attempts: {e}")
+                print(f"Fatal OpenAI API Error after {MAX_RETRIES} attempts: {e}")
                 return None
         except json.JSONDecodeError:
-            # Handle cases where the response is not valid JSON
             print(f"JSON Decode Error for review: '{review_text[:50]}...'. Retrying...")
             if attempt < MAX_RETRIES - 1:
-                delay = BASE_DELAY * (2 ** attempt)
-                time.sleep(delay)
+                time.sleep(BASE_DELAY * (2 ** attempt))
             else:
                 print("Failed to decode JSON after multiple retries. Skipping review.")
                 return None
@@ -152,21 +130,20 @@ def main():
         print("No reviews loaded. Exiting.")
         return
 
-    print("\n--- Starting Sentiment and Aspect Extraction (API Calls) ---")
+    print(f"\n--- Starting Sentiment and Aspect Extraction (OpenAI {OPENAI_MODEL}) ---")
     
     all_results = []
     
     # Iterate and analyze each review
     for i, review in enumerate(reviews):
         print(f"Analyzing Review {i+1}/{len(reviews)}: {review[:50]}...")
-        analysis_data = analyze_review_with_gemini(review)
+        analysis_data = analyze_review_with_openai(review)
         
         if analysis_data:
             analysis_data['original_review'] = review # Store for reference
             all_results.append(analysis_data)
         
-        # Introduce a small delay to respect API rate limits and be courteous
-        time.sleep(0.5) 
+        time.sleep(0.5) # Gentle throttling to avoid rate limits
 
     if not all_results:
         print("Analysis completed, but no results were successfully gathered.")
@@ -179,33 +156,44 @@ def main():
     # 5a. Flatten the aspect data for detailed analysis
     flat_aspects = []
     for _, row in df_reviews.iterrows():
-        for aspect_data in row['extracted_aspects']:
-            aspect_name = aspect_data['aspect'].lower().strip()
-            # Normalize common names for the whole product
-            if any(term in aspect_name for term in ['vision pro', 'device', 'product', 'headset', 'thing']):
-                 aspect_name = 'apple vision pro (general/value)'
-                 
-            flat_aspects.append({
-                'review_id': row.name, # Use DataFrame index as ID
-                'aspect': aspect_name,
-                'sentiment': aspect_data['sentiment']
-            })
+        # Ensure 'extracted_aspects' exists and is a list
+        if isinstance(row.get('extracted_aspects'), list):
+            for aspect_data in row['extracted_aspects']:
+                # Ensure aspect_data is a dictionary with 'aspect'
+                if isinstance(aspect_data, dict) and 'aspect' in aspect_data:
+                    aspect_name = aspect_data['aspect'].lower().strip()
+                    # Normalize common names
+                    if any(term in aspect_name for term in ['vision pro', 'device', 'product', 'headset', 'thing']):
+                         aspect_name = 'apple vision pro (general/value)'
+                         
+                    # *** THIS BLOCK IS NOW CORRECTED ***
+                    flat_aspects.append({
+                        'review_id': row.name,
+                        'aspect': aspect_name,
+                        'sentiment': aspect_data.get('sentiment', 'Neutral') # Default to Neutral if missing
+                    })
             
     df_aspects = pd.DataFrame(flat_aspects)
     
+    if df_aspects.empty:
+        print("No aspects were successfully extracted. Stopping analysis.")
+        return
+
     # 5b. Overall Sentiment Distribution
     sentiment_counts = df_reviews['overall_sentiment'].value_counts()
     
     # 5c. Aspect Frequency and Sentiment
-    # Find the top 10 most mentioned aspects
     aspect_counts = df_aspects['aspect'].value_counts().head(10)
     top_aspects = aspect_counts.index.tolist()
     
-    # Group aspect sentiment for visualization
     aspect_sentiment_grouped = df_aspects.groupby(['aspect', 'sentiment']).size().unstack(fill_value=0)
     
-    # Filter for only the top aspects, ensuring all sentiment columns exist
-    aspect_sentiment_top = aspect_sentiment_grouped.loc[top_aspects]
+    valid_top_aspects = [a for a in top_aspects if a in aspect_sentiment_grouped.index]
+    if not valid_top_aspects:
+        print("Top aspects could not be found in sentiment grouping. Stopping visualization.")
+        return
+        
+    aspect_sentiment_top = aspect_sentiment_grouped.loc[valid_top_aspects]
     aspect_sentiment_top = aspect_sentiment_top.reindex(columns=['Positive', 'Negative', 'Neutral'], fill_value=0)
 
     print("\n--- Summary of Findings ---")
@@ -218,7 +206,6 @@ def main():
     
     # --- 6. VISUALIZATION ---
     
-    # Setup for plot saving
     output_dir = "analysis_output"
     os.makedirs(output_dir, exist_ok=True)
     
@@ -228,15 +215,17 @@ def main():
     
     # Visualization 1: Overall Sentiment Distribution
     plt.figure(figsize=(8, 6))
-    # Define colors for better representation
     colors = {'Positive': '#34A853', 'Negative': '#EA4335', 'Neutral': '#4285F4'}
-    sentiment_counts.plot(kind='bar', color=[colors.get(s, '#808080') for s in sentiment_counts.index])
+    # Ensure correct color mapping even if some sentiments are missing
+    color_map = [colors.get(s, '#808080') for s in sentiment_counts.index]
+    sentiment_counts.plot(kind='bar', color=color_map)
     plt.title('Overall Customer Sentiment Distribution', fontsize=16)
     plt.ylabel('Number of Reviews', fontsize=12)
     plt.xlabel('Sentiment Category', fontsize=12)
     plt.xticks(rotation=0)
     plt.grid(axis='y', linestyle='--')
     plt.tight_layout()
+    # *** THIS LINE IS NOW CORRECTED (added os.) ***
     plt.savefig(os.path.join(output_dir, 'overall_sentiment_distribution.png'))
     plt.close()
     
@@ -271,11 +260,10 @@ def main():
         plt.savefig(os.path.join(output_dir, 'aspect_sentiment_breakdown.png'))
         plt.close()
     
-    print("\nVisualizations saved to the 'analysis_output' directory (overall_sentiment_distribution.png, aspect_word_cloud.png, aspect_sentiment_breakdown.png).")
+    print("\nVisualizations saved to the 'analysis_output' directory.")
     
-    # --- 7. INSIGHTS AND RECOMMENDATIONS (LLM Generation) ---
+    # --- 7. INSIGHTS AND RECOMMENDATIONS (OpenAI Generation) ---
     
-    # Prepare a summary of the findings to feed back to the LLM for high-level insight
     summary_data = {
         'overall_sentiment_counts': sentiment_counts.to_dict(),
         'top_aspects_sentiment_breakdown': aspect_sentiment_top.to_dict('index')
@@ -296,22 +284,17 @@ def main():
         "based only on the provided data summary. Use Markdown for formatting the report."
     )
     
-    # Use standard text generation for the final report
-    recommendation_payload = {
-        "contents": [{ "parts": [{ "text": recommendation_prompt }] }],
-        "systemInstruction": { "parts": [{ "text": recommendation_system_prompt }] }
-    }
-    
     report = "Error: Could not generate final report."
     try:
-        response = requests.post(
-            API_URL, 
-            headers={'Content-Type': 'application/json'},
-            data=json.dumps(recommendation_payload)
+        # Final API call to generate the report
+        completion = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": recommendation_system_prompt},
+                {"role": "user", "content": recommendation_prompt}
+            ]
         )
-        response.raise_for_status()
-        report_result = response.json()
-        report = report_result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', report)
+        report = completion.choices[0].message.content
     except Exception as e:
         print(f"Failed to generate final report: {e}")
     
