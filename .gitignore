@@ -1,0 +1,22 @@
+# Git Ignore File
+# Exclude files and directories specific to this project
+
+# 1. Secret/API Key File (CRITICAL)
+# This ensures your Perinskey.py file is NEVER uploaded to GitHub.
+Perinskey.py
+
+# 2. Python Environment & Compilation Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+# 3. Output/Results Directory
+# The visualization images will be saved here.
+analysis_output/
+
+# 4. IDE Files (VS Code)
+.vscode/
