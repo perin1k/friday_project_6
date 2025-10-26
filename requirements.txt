@@ -1,7 +1,7 @@
 # requirements.txt
 # Python packages required to run vision_pro_analysis.py
 
-requests
 pandas
 matplotlib
 wordcloud
+openai
